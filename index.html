@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0a0f1a" />
+  <title>Trading Journal V1</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark">TJ</div>
+        <div>
+          <div class="brand-name">Trading Journal</div>
+          <div class="brand-subtitle">Version 1</div>
+        </div>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <button class="nav-link active" data-route="dashboard"><span>▦</span> Dashboard</button>
+        <button class="nav-link" data-route="add"><span>＋</span> Add Trade</button>
+        <button class="nav-link" data-route="journal"><span>≡</span> Trade Journal</button>
+        <button class="nav-link" data-route="analytics"><span>⌁</span> Analytics</button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="storage-badge"><span class="status-dot"></span> Local-first storage</div>
+        <p>Your data stays in this browser in V1.</p>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-button mobile-menu" id="mobileMenu" aria-label="Open menu">☰</button>
+        <div>
+          <h1 id="pageTitle">Dashboard</h1>
+          <p id="pageSubtitle">Your trading activity at a glance.</p>
+        </div>
+        <button class="primary-button" id="quickAdd">＋ Add Trade</button>
+      </header>
+
+      <section id="view" class="view"></section>
+    </main>
+  </div>
+
+  <div class="modal hidden" id="modal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-header">
+        <h2 id="modalTitle">Trade Details</h2>
+        <button class="icon-button" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <div id="modalBody" class="modal-body"></div>
+    </div>
+  </div>
+
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
