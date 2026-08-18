@@ -17,6 +17,30 @@ const modal = document.querySelector('#modal');
 const modalBody = document.querySelector('#modalBody');
 const modalTitle = document.querySelector('#modalTitle');
 const sidebar = document.querySelector('#sidebar');
+const themeToggle = document.querySelector('#themeToggle');
+const themeToggleIcon = document.querySelector('#themeToggleIcon');
+const themeToggleLabel = document.querySelector('#themeToggleLabel');
+const themeColorMeta = document.querySelector('#themeColorMeta');
+
+const THEME_STORAGE_KEY = 'tradingJournalTheme';
+
+function applyTheme(theme, { persist = true } = {}) {
+  const resolved = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved;
+  if (themeToggleIcon) themeToggleIcon.textContent = resolved === 'dark' ? '☀' : '☾';
+  if (themeToggleLabel) themeToggleLabel.textContent = resolved === 'dark' ? 'Light' : 'Dark';
+  if (themeToggle) themeToggle.setAttribute('aria-label', `Switch to ${resolved === 'dark' ? 'light' : 'dark'} theme`);
+  if (themeColorMeta) themeColorMeta.setAttribute('content', resolved === 'dark' ? '#0a0f1a' : '#f4f7fb');
+  if (persist) localStorage.setItem(THEME_STORAGE_KEY, resolved);
+}
+
+function initializeTheme() {
+  const saved = localStorage.getItem(THEME_STORAGE_KEY);
+  applyTheme(saved === 'light' ? 'light' : 'dark', { persist: false });
+}
+
+initializeTheme();
 
 let currentRoute = 'dashboard';
 let tradeSort = 'desc';
@@ -33,6 +57,7 @@ const routeMeta = {
 document.querySelectorAll('.nav-link').forEach(btn => btn.addEventListener('click', () => { if (appReady) navigate(btn.dataset.route); }));
 document.querySelector('#quickAdd').addEventListener('click', () => { if (appReady) navigate('add'); });
 document.querySelector('#mobileMenu').addEventListener('click', () => sidebar.classList.toggle('open'));
+themeToggle?.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'));
 document.querySelectorAll('[data-close-modal]').forEach(el => el.addEventListener('click', closeModal));
 
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
