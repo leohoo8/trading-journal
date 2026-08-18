@@ -70,3 +70,32 @@ export function groupCounts(items, keyFn) {
   }
   return [...out.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
 }
+
+
+export function normalizeExits(exits = []) {
+  if (!Array.isArray(exits)) return [];
+  return exits.map(exit => ({
+    quantity: Number(exit?.quantity),
+    price: Number(exit?.price),
+  })).filter(exit => Number.isFinite(exit.quantity) && exit.quantity > 0 && Number.isFinite(exit.price) && exit.price >= 0);
+}
+
+export function exitedQuantity(exits = []) {
+  return normalizeExits(exits).reduce((sum, exit) => sum + exit.quantity, 0);
+}
+
+export function weightedAverageExit(exits = []) {
+  const clean = normalizeExits(exits);
+  const quantity = clean.reduce((sum, exit) => sum + exit.quantity, 0);
+  if (!quantity) return null;
+  return clean.reduce((sum, exit) => sum + exit.quantity * exit.price, 0) / quantity;
+}
+
+export function calculateRealizedPnL(entryPrice, exits = [], contractType = 'Stock') {
+  const entry = Number(entryPrice);
+  if (!Number.isFinite(entry)) return null;
+  const clean = normalizeExits(exits);
+  if (!clean.length) return null;
+  const multiplier = contractType === 'Stock' ? 1 : 100;
+  return clean.reduce((sum, exit) => sum + ((exit.price - entry) * exit.quantity * multiplier), 0);
+}

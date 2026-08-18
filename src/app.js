@@ -1,6 +1,7 @@
 import {
   CONTRACT_TYPES, WEEKDAYS, dayOfWeek, categorizeTime, calculateDTE,
-  normalizeTicker, formatDate, formatTime, groupCounts
+  normalizeTicker, formatDate, formatTime, groupCounts, normalizeExits, exitedQuantity,
+  weightedAverageExit, calculateRealizedPnL
 } from './domain.js';
 import {
   getTrades, saveTrade, deleteTrade, getSetups, saveSetups, getTimeRules, saveTimeRules,
@@ -216,7 +217,7 @@ async function renderDashboard() {
   const tickers = groupCounts(trades, t => t.ticker).slice(0, 8);
   const options = trades.filter(t => t.contractType !== 'Stock').length;
   const uniqueTickers = new Set(trades.map(t => t.ticker)).size;
-  const recordedPnLs = trades.map(t => tradeMetric(t, 'profitLoss')).filter(v => v !== null);
+  const recordedPnLs = trades.map(resolvedTradePnL).filter(v => v !== null);
   const netPnL = recordedPnLs.reduce((sum, value) => sum + value, 0);
   const winningTrades = recordedPnLs.filter(value => value > 0).length;
 
@@ -274,6 +275,97 @@ function optionalNumber(value) {
 function tradeMetric(trade, key) {
   const value = trade?.customFields?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+
+function tradeExits(trade) {
+  const stored = normalizeExits(trade?.customFields?.exits || []);
+  if (stored.length) return stored;
+  const legacyExit = tradeMetric(trade, 'exitPrice');
+  const legacySize = tradeMetric(trade, 'positionSize');
+  if (legacyExit !== null && legacySize !== null && legacySize > 0) {
+    return [{ quantity: legacySize, price: legacyExit }];
+  }
+  return [];
+}
+
+function resolvedTradePnL(trade) {
+  const storedExits = normalizeExits(trade?.customFields?.exits || []);
+  if (storedExits.length) return calculateRealizedPnL(tradeMetric(trade, 'entryPrice'), storedExits, trade.contractType);
+  const legacyPnL = tradeMetric(trade, 'profitLoss');
+  if (legacyPnL !== null) return legacyPnL;
+  return calculateRealizedPnL(tradeMetric(trade, 'entryPrice'), tradeExits(trade), trade.contractType);
+}
+
+function positionUnit(contractType) {
+  return contractType === 'Stock' ? 'shares' : 'contracts';
+}
+
+function collectExitRows(container, contractType, { strict = true } = {}) {
+  const exits = [];
+  for (const row of container?.querySelectorAll('.exit-row') || []) {
+    const quantityText = row.querySelector('.exit-quantity')?.value?.trim() || '';
+    const priceText = row.querySelector('.exit-price')?.value?.trim() || '';
+    if (!quantityText && !priceText) continue;
+    const quantity = optionalNumber(quantityText);
+    const price = optionalNumber(priceText);
+    if (strict && (quantity === null || price === null)) throw new Error('Each exit needs both a quantity and an exit price.');
+    if (quantity === null || price === null) continue;
+    if (quantity <= 0) { if (strict) throw new Error('Exit quantity must be greater than 0.'); else continue; }
+    if (price < 0) { if (strict) throw new Error('Exit price cannot be negative.'); else continue; }
+    if (contractType !== 'Stock' && !Number.isInteger(quantity)) { if (strict) throw new Error('Option exit quantities must be whole contracts.'); else continue; }
+    exits.push({ quantity, price });
+  }
+  return exits;
+}
+
+function validateExitQuantity(positionSize, exits) {
+  if (positionSize === null) return;
+  const totalExited = exitedQuantity(exits);
+  if (totalExited > positionSize + 1e-9) {
+    throw new Error(`Exit quantity (${totalExited}) cannot be larger than the position size (${positionSize}).`);
+  }
+}
+
+function validatePositionSize(positionSize, contractType) {
+  if (positionSize === null) return;
+  if (positionSize <= 0) throw new Error('Position size must be greater than 0.');
+  if (contractType !== 'Stock' && !Number.isInteger(positionSize)) throw new Error('Option position size must be a whole number of contracts.');
+}
+
+function addExitRow(container, exit = {}, onChange = () => {}) {
+  const row = document.createElement('div');
+  row.className = 'exit-row';
+  row.innerHTML = `
+    <div class="field"><label>Quantity sold</label><input class="exit-quantity" type="number" inputmode="decimal" step="any" min="0" placeholder="e.g. 5" value="${exit.quantity ?? ''}"></div>
+    <div class="field"><label>Exit Price</label><input class="exit-price" type="number" inputmode="decimal" step="0.01" min="0" placeholder="e.g. 1.70" value="${exit.price ?? ''}"></div>
+    <button class="ghost-button exit-remove" type="button" aria-label="Remove exit">Remove</button>`;
+  row.querySelectorAll('input').forEach(input => input.addEventListener('input', onChange));
+  row.querySelector('.exit-remove').addEventListener('click', () => { row.remove(); onChange(); });
+  container.appendChild(row);
+  return row;
+}
+
+function updateExitPreview({ container, entryInput, sizeInput, contractSelect, pnlHost, summaryHost }) {
+  const entryPrice = optionalNumber(entryInput?.value);
+  const positionSize = optionalNumber(sizeInput?.value);
+  const exits = collectExitRows(container, contractSelect?.value || 'Stock', { strict: false });
+  const sold = exitedQuantity(exits);
+  const average = weightedAverageExit(exits);
+  const pnl = calculateRealizedPnL(entryPrice, exits, contractSelect?.value || 'Stock');
+  if (pnlHost) {
+    pnlHost.textContent = formatMoney(pnl, { sign: true });
+    pnlHost.className = `readonly-value ${pnlClass(pnl)}`;
+  }
+  if (summaryHost) {
+    const unit = positionUnit(contractSelect?.value || 'Stock');
+    if (!exits.length) summaryHost.textContent = 'No exits recorded yet.';
+    else {
+      const remaining = positionSize === null ? null : Math.max(0, positionSize - sold);
+      const remainingText = remaining === null ? '' : ` · ${remaining} ${unit} remaining`;
+      summaryHost.textContent = `${sold} ${unit} sold · Avg exit ${formatMoney(average)}${remainingText}`;
+    }
+  }
 }
 
 function formatMoney(value, { sign = false } = {}) {
@@ -334,12 +426,16 @@ async function renderAddTrade() {
           </div>
         </div>
         <div class="form-section">
-          <div class="form-section-title">Execution & result</div>
+          <div class="form-section-title">Execution & exits</div>
           <div class="form-grid">
-            <div class="field"><label for="entryPrice">Entry Price</label><input id="entryPrice" name="entryPrice" type="number" inputmode="decimal" step="0.01" placeholder="0.00"></div>
-            <div class="field"><label for="exitPrice">Exit Price</label><input id="exitPrice" name="exitPrice" type="number" inputmode="decimal" step="0.01" placeholder="0.00"></div>
+            <div class="field"><label for="entryPrice">Entry Price</label><input id="entryPrice" name="entryPrice" type="number" inputmode="decimal" step="0.01" min="0" placeholder="e.g. 1.20"></div>
             <div class="field"><label for="positionSize">Position Size</label><input id="positionSize" name="positionSize" type="number" inputmode="decimal" step="any" min="0" placeholder="Shares or contracts"></div>
-            <div class="field"><label for="profitLoss">Profit / Loss ($)</label><input id="profitLoss" name="profitLoss" type="number" inputmode="decimal" step="0.01" placeholder="e.g. 125.50 or -75.00"><div class="helper">Enter the final dollar P/L manually for now. Automatic calculation can be added when trade direction and fees are introduced.</div></div>
+            <div class="field"><label>Realized P/L</label><div class="readonly-value" id="realizedPnlDisplay">—</div><div class="helper">Calculated automatically from the exit quantities and prices below. Options use the standard 100x contract multiplier. V1.3 assumes a long trade (buy first, sell later).</div></div>
+          </div>
+          <div class="exit-builder">
+            <div class="exit-builder-header"><div><strong>Partial Exits</strong><div class="helper">Record each scale-out separately.</div></div><button class="secondary-button" id="addExit" type="button">＋ Add Exit</button></div>
+            <div class="exit-list" id="exitRows"></div>
+            <div class="exit-summary" id="exitSummary">No exits recorded yet.</div>
           </div>
         </div>
         <div class="form-section">
@@ -364,6 +460,11 @@ async function renderAddTrade() {
   const contract = document.querySelector('#contractType');
   const expiration = document.querySelector('#expirationDate');
   const screenshotInput = document.querySelector('#screenshots');
+  const entryInput = document.querySelector('#entryPrice');
+  const positionInput = document.querySelector('#positionSize');
+  const exitRows = document.querySelector('#exitRows');
+  const realizedPnlDisplay = document.querySelector('#realizedPnlDisplay');
+  const exitSummary = document.querySelector('#exitSummary');
 
   const refreshDerived = () => {
     document.querySelector('#dayDisplay').textContent = dayOfWeek(dateInput.value);
@@ -371,10 +472,12 @@ async function renderAddTrade() {
     const dte = calculateDTE(dateInput.value, expiration.value);
     document.querySelector('#dteDisplay').textContent = dte === '' ? '—' : `${dte} days`;
   };
+  const refreshExitPreview = () => updateExitPreview({ container: exitRows, entryInput, sizeInput: positionInput, contractSelect: contract, pnlHost: realizedPnlDisplay, summaryHost: exitSummary });
   const refreshContract = () => {
     const isOption = contract.value !== 'Stock';
     document.querySelector('#optionFields').classList.toggle('hidden', !isOption);
     document.querySelector('#cpDisplay').textContent = contract.value === 'Call Option' ? 'Call' : contract.value === 'Put Option' ? 'Put' : '—';
+    refreshExitPreview();
   };
 
   dateInput.addEventListener('change', refreshDerived);
@@ -383,7 +486,18 @@ async function renderAddTrade() {
   contract.addEventListener('change', refreshContract);
   tickerInput.addEventListener('input', () => { tickerInput.value = tickerInput.value.toUpperCase(); });
   screenshotInput.addEventListener('change', () => previewFiles(screenshotInput.files));
+  entryInput.addEventListener('input', refreshExitPreview);
+  positionInput.addEventListener('input', refreshExitPreview);
+  document.querySelector('#addExit').addEventListener('click', () => addExitRow(exitRows, {}, refreshExitPreview));
+  addExitRow(exitRows, {}, refreshExitPreview);
   refreshDerived(); refreshContract();
+  form.addEventListener('reset', () => setTimeout(() => {
+    exitRows.innerHTML = '';
+    addExitRow(exitRows, {}, refreshExitPreview);
+    previewFiles([]);
+    refreshDerived();
+    refreshContract();
+  }, 0));
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -397,7 +511,7 @@ async function renderAddTrade() {
       const contractType = contract.value;
       const trade = {
         id: crypto.randomUUID(),
-        schemaVersion: 2,
+        schemaVersion: 3,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         tradeDate,
@@ -414,12 +528,22 @@ async function renderAddTrade() {
           dte: calculateDTE(tradeDate, expiration.value) === '' ? null : calculateDTE(tradeDate, expiration.value),
         },
         screenshots: [],
-        customFields: {
-          entryPrice: optionalNumber(document.querySelector('#entryPrice').value),
-          exitPrice: optionalNumber(document.querySelector('#exitPrice').value),
-          positionSize: optionalNumber(document.querySelector('#positionSize').value),
-          profitLoss: optionalNumber(document.querySelector('#profitLoss').value),
-        },
+        customFields: (() => {
+          const entryPrice = optionalNumber(entryInput.value);
+          const positionSize = optionalNumber(positionInput.value);
+          const exits = collectExitRows(exitRows, contractType);
+          validatePositionSize(positionSize, contractType);
+          validateExitQuantity(positionSize, exits);
+          const averageExit = weightedAverageExit(exits);
+          const profitLoss = calculateRealizedPnL(entryPrice, exits, contractType);
+          return {
+            entryPrice,
+            positionSize,
+            exits,
+            exitPrice: averageExit,
+            profitLoss,
+          };
+        })(),
       };
       await saveTrade(trade, screenshotFiles);
       toast(`${trade.ticker} trade saved`);
@@ -521,12 +645,15 @@ function drawJournalTable(allTrades) {
   const host = document.querySelector('#journalTable');
   if (!trades.length) { host.innerHTML = '<div class="empty-state"><strong>No matching trades</strong>Try changing the filters or add a new trade.</div>'; return; }
   host.innerHTML = `<div class="table-wrap"><table class="trade-table"><thead><tr>
-    <th><button class="sort-button" id="sortDate">Date ${tradeSort === 'desc' ? '↓' : '↑'}</button></th><th>Time</th><th>Day</th><th>Ticker</th><th>Setup</th><th>Contract</th><th>Entry</th><th>Exit</th><th>Size</th><th>P/L</th><th>Screenshot</th><th></th>
+    <th><button class="sort-button" id="sortDate">Date ${tradeSort === 'desc' ? '↓' : '↑'}</button></th><th>Time</th><th>Day</th><th>Ticker</th><th>Setup</th><th>Contract</th><th>Entry</th><th>Exits</th><th>Size</th><th>Realized P/L</th><th>Screenshot</th><th></th>
     </tr></thead><tbody>${trades.map(t => {
-      const pnl = tradeMetric(t, 'profitLoss');
+      const pnl = resolvedTradePnL(t);
+      const exits = tradeExits(t);
+      const averageExit = weightedAverageExit(exits);
+      const exitLabel = exits.length ? `${exits.length} exit${exits.length === 1 ? '' : 's'} · avg ${formatMoney(averageExit)}` : '—';
       return `<tr>
       <td>${formatDate(t.tradeDate)}</td><td>${formatTime(t.tradeTime)}</td><td>${escapeHtml(t.dayOfWeek)}</td><td class="ticker">${escapeHtml(t.ticker)}</td><td>${escapeHtml(t.setupType || '—')}</td>
-      <td><span class="pill">${escapeHtml(t.contractType)}</span></td><td>${formatMoney(tradeMetric(t, 'entryPrice'))}</td><td>${formatMoney(tradeMetric(t, 'exitPrice'))}</td><td>${tradeMetric(t, 'positionSize') ?? '—'}</td><td class="${pnlClass(pnl)}">${formatMoney(pnl, { sign: true })}</td><td>${screenshotCell(t)}</td>
+      <td><span class="pill">${escapeHtml(t.contractType)}</span></td><td>${formatMoney(tradeMetric(t, 'entryPrice'))}</td><td><span class="exit-cell">${escapeHtml(exitLabel)}</span></td><td>${tradeMetric(t, 'positionSize') ?? '—'}</td><td class="${pnlClass(pnl)}">${formatMoney(pnl, { sign: true })}</td><td>${screenshotCell(t)}</td>
       <td><button class="secondary-button" data-open-trade="${t.id}">Review</button></td>
     </tr>`;
     }).join('')}</tbody></table></div>`;
@@ -560,22 +687,44 @@ async function openTrade(id) {
   const trades = await getTrades();
   const t = trades.find(x => x.id === id);
   if (!t) return;
+  const exits = tradeExits(t);
+  const entryPrice = tradeMetric(t, 'entryPrice');
+  const positionSize = tradeMetric(t, 'positionSize');
+  const soldQuantity = exitedQuantity(exits);
+  const remainingQuantity = positionSize === null ? null : Math.max(0, positionSize - soldQuantity);
+  const averageExit = weightedAverageExit(exits);
+  const realizedPnL = resolvedTradePnL(t);
+  const unit = positionUnit(t.contractType);
+  const exitBreakdown = exits.length ? exits.map((exit, index) => {
+    const legPnL = calculateRealizedPnL(entryPrice, [exit], t.contractType);
+    return `<div class="exit-detail-row"><div><span class="exit-number">Exit ${index + 1}</span><strong>${exit.quantity} ${unit} @ ${formatMoney(exit.price)}</strong></div><div class="${pnlClass(legPnL)}">${formatMoney(legPnL, { sign: true })}</div></div>`;
+  }).join('') : '<div class="helper">No exits recorded yet.</div>';
+
   modalTitle.textContent = 'Trade Review';
   modalBody.innerHTML = `
     <div class="detail-header"><div><div class="detail-ticker">${escapeHtml(t.ticker)}</div><div class="detail-meta">${formatDate(t.tradeDate)} · ${formatTime(t.tradeTime)}</div></div><button class="danger-button" id="deleteTrade">Delete Trade</button></div>
     <div class="detail-grid">
       ${detailItem('Day of Week', t.dayOfWeek)}${detailItem('Time of Day', t.timeOfDay)}${detailItem('Setup', t.setupType || '—')}
       ${detailItem('Contract Type', t.contractType)}${detailItem('Strike', t.option?.strikePrice ?? '—')}${detailItem('Expiration', t.option?.expirationDate ? formatDate(t.option.expirationDate) : '—')}
-      ${detailItem('DTE', t.option?.dte ?? '—')}${detailItem('Entry Price', formatMoney(tradeMetric(t, 'entryPrice')))}${detailItem('Exit Price', formatMoney(tradeMetric(t, 'exitPrice')))}
-      ${detailItem('Position Size', tradeMetric(t, 'positionSize') ?? '—')}${detailItem('Profit / Loss', formatMoney(tradeMetric(t, 'profitLoss'), { sign: true }))}
+      ${detailItem('DTE', t.option?.dte ?? '—')}${detailItem('Entry Price', formatMoney(entryPrice))}${detailItem('Position Size', positionSize === null ? '—' : `${positionSize} ${unit}`)}
+      ${detailItem('Exited', exits.length ? `${soldQuantity} ${unit}` : '—')}${detailItem('Remaining', remainingQuantity === null ? '—' : `${remainingQuantity} ${unit}`)}${detailItem('Avg Exit', formatMoney(averageExit))}
+      ${detailItem('Realized P/L', formatMoney(realizedPnL, { sign: true }))}
+    </div>
+    <div class="card exit-breakdown-card">
+      <div class="card-header"><div><h3>Exit Breakdown</h3><p class="card-subtitle">Every partial sale is kept as part of this trade.</p></div></div>
+      <div class="exit-detail-list">${exitBreakdown}</div>
     </div>
     <div class="card result-editor">
-      <div class="card-header"><div><h3>Edit Execution & Result</h3><p class="card-subtitle">Use this to add these values to older trades too.</p></div></div>
+      <div class="card-header"><div><h3>Edit Execution & Exits</h3><p class="card-subtitle">Add, remove, or change partial exits at any time.</p></div></div>
       <div class="form-grid">
-        <div class="field"><label for="reviewEntryPrice">Entry Price</label><input id="reviewEntryPrice" type="number" step="0.01" value="${tradeMetric(t, 'entryPrice') ?? ''}"></div>
-        <div class="field"><label for="reviewExitPrice">Exit Price</label><input id="reviewExitPrice" type="number" step="0.01" value="${tradeMetric(t, 'exitPrice') ?? ''}"></div>
-        <div class="field"><label for="reviewPositionSize">Position Size</label><input id="reviewPositionSize" type="number" step="any" min="0" value="${tradeMetric(t, 'positionSize') ?? ''}"></div>
-        <div class="field"><label for="reviewProfitLoss">Profit / Loss ($)</label><input id="reviewProfitLoss" type="number" step="0.01" value="${tradeMetric(t, 'profitLoss') ?? ''}"></div>
+        <div class="field"><label for="reviewEntryPrice">Entry Price</label><input id="reviewEntryPrice" type="number" step="0.01" min="0" value="${entryPrice ?? ''}"></div>
+        <div class="field"><label for="reviewPositionSize">Position Size</label><input id="reviewPositionSize" type="number" step="any" min="0" value="${positionSize ?? ''}"></div>
+        <div class="field"><label>Realized P/L</label><div class="readonly-value ${pnlClass(realizedPnL)}" id="reviewPnlDisplay">${formatMoney(realizedPnL, { sign: true })}</div></div>
+      </div>
+      <div class="exit-builder">
+        <div class="exit-builder-header"><div><strong>Partial Exits</strong><div class="helper">Quantity sold + price for each scale-out.</div></div><button class="secondary-button" id="reviewAddExit" type="button">＋ Add Exit</button></div>
+        <div class="exit-list" id="reviewExitRows"></div>
+        <div class="exit-summary" id="reviewExitSummary"></div>
       </div>
       <div class="form-footer"><button class="primary-button" id="saveTradeResults">Save Results</button></div>
     </div>
@@ -583,25 +732,47 @@ async function openTrade(id) {
     <div class="large-screenshots">${t.screenshots?.length ? t.screenshots.map(s => `<a href="${(s.signedUrl || s.dataUrl || '')}" target="_blank" rel="noopener"><img src="${(s.signedUrl || s.dataUrl || '')}" alt="${escapeHtml(s.name)}"></a>`).join('') : '<div class="helper">No screenshots attached.</div>'}</div>
     <div class="future-zone"><strong>Reserved for future trade review fields.</strong><br><br>Risk, R-multiple, notes, emotions, mistakes, grades, before/after images, and AI analysis can be added here later.</div>`;
   modal.classList.remove('hidden'); modal.setAttribute('aria-hidden','false');
+
+  const reviewEntry = document.querySelector('#reviewEntryPrice');
+  const reviewSize = document.querySelector('#reviewPositionSize');
+  const reviewRows = document.querySelector('#reviewExitRows');
+  const reviewPnl = document.querySelector('#reviewPnlDisplay');
+  const reviewSummary = document.querySelector('#reviewExitSummary');
+  const contractProxy = { value: t.contractType };
+  const refreshReview = () => updateExitPreview({ container: reviewRows, entryInput: reviewEntry, sizeInput: reviewSize, contractSelect: contractProxy, pnlHost: reviewPnl, summaryHost: reviewSummary });
+  (exits.length ? exits : [{}]).forEach(exit => addExitRow(reviewRows, exit, refreshReview));
+  reviewEntry.addEventListener('input', refreshReview);
+  reviewSize.addEventListener('input', refreshReview);
+  document.querySelector('#reviewAddExit').addEventListener('click', () => addExitRow(reviewRows, {}, refreshReview));
+  refreshReview();
+
   document.querySelector('#saveTradeResults').addEventListener('click', async () => {
     const button = document.querySelector('#saveTradeResults');
     button.disabled = true;
     button.textContent = 'Saving…';
     try {
+      const nextEntry = optionalNumber(reviewEntry.value);
+      const nextSize = optionalNumber(reviewSize.value);
+      const nextExits = collectExitRows(reviewRows, t.contractType);
+      validatePositionSize(nextSize, t.contractType);
+      validateExitQuantity(nextSize, nextExits);
+      const nextAverageExit = weightedAverageExit(nextExits);
+      const nextPnL = calculateRealizedPnL(nextEntry, nextExits, t.contractType);
       const updatedTrade = {
         ...t,
-        schemaVersion: Math.max(2, t.schemaVersion || 1),
+        schemaVersion: Math.max(3, t.schemaVersion || 1),
         updatedAt: new Date().toISOString(),
         customFields: {
           ...(t.customFields || {}),
-          entryPrice: optionalNumber(document.querySelector('#reviewEntryPrice').value),
-          exitPrice: optionalNumber(document.querySelector('#reviewExitPrice').value),
-          positionSize: optionalNumber(document.querySelector('#reviewPositionSize').value),
-          profitLoss: optionalNumber(document.querySelector('#reviewProfitLoss').value),
+          entryPrice: nextEntry,
+          positionSize: nextSize,
+          exits: nextExits,
+          exitPrice: nextAverageExit,
+          profitLoss: nextPnL,
         },
       };
       await saveTrade(updatedTrade);
-      toast('Trade results updated');
+      toast('Trade exits updated');
       closeModal();
       if (currentRoute === 'journal') await renderJournal(); else await renderDashboard();
     } catch (error) {
