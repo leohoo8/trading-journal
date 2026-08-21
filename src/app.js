@@ -10,6 +10,8 @@ import {
 } from './storage.js';
 import { escapeHtml, barChart, toast } from './ui.js';
 
+const MONEYNESS_OPTIONS = ['ITM', 'ATM', 'OTM'];
+
 const view = document.querySelector('#view');
 const pageTitle = document.querySelector('#pageTitle');
 const pageSubtitle = document.querySelector('#pageSubtitle');
@@ -444,6 +446,7 @@ async function renderAddTrade() {
           <div class="option-fields hidden" id="optionFields">
             <div class="form-grid">
               <div class="field"><label for="strikePrice">Strike Price</label><input id="strikePrice" name="strikePrice" type="number" inputmode="decimal" step="0.01" placeholder="250.00"></div>
+              <div class="field"><label for="moneyness">ITM / ATM / OTM</label><select id="moneyness" name="moneyness"><option value="">Select</option>${MONEYNESS_OPTIONS.map(value => `<option value="${value}">${value}</option>`).join('')}</select><div class="helper">Classify the strike at the time you entered the trade.</div></div>
               <div class="field"><label for="expirationDate">Expiration Date</label><input id="expirationDate" name="expirationDate" type="date"></div>
               <div class="field"><label>DTE</label><div class="readonly-value" id="dteDisplay">—</div></div>
               <div class="field"><label>Call / Put</label><div class="readonly-value" id="cpDisplay">—</div></div>
@@ -536,7 +539,7 @@ async function renderAddTrade() {
       const contractType = contract.value;
       const trade = {
         id: crypto.randomUUID(),
-        schemaVersion: 3,
+        schemaVersion: 4,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         tradeDate,
@@ -549,6 +552,7 @@ async function renderAddTrade() {
         option: contractType === 'Stock' ? null : {
           side: contractType === 'Call Option' ? 'Call' : 'Put',
           strikePrice: document.querySelector('#strikePrice').value ? Number(document.querySelector('#strikePrice').value) : null,
+          moneyness: document.querySelector('#moneyness').value || null,
           expirationDate: expiration.value || null,
           dte: calculateDTE(tradeDate, expiration.value) === '' ? null : calculateDTE(tradeDate, expiration.value),
         },
@@ -720,6 +724,8 @@ async function openTrade(id) {
   const averageExit = weightedAverageExit(exits);
   const realizedPnL = resolvedTradePnL(t);
   const unit = positionUnit(t.contractType);
+  const isOptionTrade = t.contractType !== 'Stock';
+  const moneyness = t.option?.moneyness || '';
   const exitBreakdown = exits.length ? exits.map((exit, index) => {
     const legPnL = calculateRealizedPnL(entryPrice, [exit], t.contractType);
     return `<div class="exit-detail-row"><div><span class="exit-number">Exit ${index + 1}</span><strong>${exit.quantity} ${unit} @ ${formatMoney(exit.price)}</strong></div><div class="${pnlClass(legPnL)}">${formatMoney(legPnL, { sign: true })}</div></div>`;
@@ -730,8 +736,8 @@ async function openTrade(id) {
     <div class="detail-header"><div><div class="detail-ticker">${escapeHtml(t.ticker)}</div><div class="detail-meta">${formatDate(t.tradeDate)} · ${formatTime(t.tradeTime)}</div></div><button class="danger-button" id="deleteTrade">Delete Trade</button></div>
     <div class="detail-grid">
       ${detailItem('Day of Week', t.dayOfWeek)}${detailItem('Time of Day', t.timeOfDay)}${detailItem('Setup', t.setupType || '—')}
-      ${detailItem('Contract Type', t.contractType)}${detailItem('Strike', t.option?.strikePrice ?? '—')}${detailItem('Expiration', t.option?.expirationDate ? formatDate(t.option.expirationDate) : '—')}
-      ${detailItem('DTE', t.option?.dte ?? '—')}${detailItem('Entry Price', formatMoney(entryPrice))}${detailItem('Position Size', positionSize === null ? '—' : `${positionSize} ${unit}`)}
+      ${detailItem('Contract Type', t.contractType)}${detailItem('Strike', t.option?.strikePrice ?? '—')}${detailItem('ITM / ATM / OTM', isOptionTrade ? (moneyness || '—') : '—')}
+      ${detailItem('Expiration', t.option?.expirationDate ? formatDate(t.option.expirationDate) : '—')}${detailItem('DTE', t.option?.dte ?? '—')}${detailItem('Entry Price', formatMoney(entryPrice))}${detailItem('Position Size', positionSize === null ? '—' : `${positionSize} ${unit}`)}
       ${detailItem('Exited', exits.length ? `${soldQuantity} ${unit}` : '—')}${detailItem('Remaining', remainingQuantity === null ? '—' : `${remainingQuantity} ${unit}`)}${detailItem('Avg Exit', formatMoney(averageExit))}
       ${detailItem('Realized P/L', formatMoney(realizedPnL, { sign: true }))}
     </div>
@@ -744,6 +750,7 @@ async function openTrade(id) {
       <div class="form-grid">
         <div class="field"><label for="reviewEntryPrice">Entry Price</label><input id="reviewEntryPrice" type="number" step="0.01" min="0" value="${entryPrice ?? ''}"></div>
         <div class="field"><label for="reviewPositionSize">Position Size</label><input id="reviewPositionSize" type="number" step="any" min="0" value="${positionSize ?? ''}"></div>
+        ${isOptionTrade ? `<div class="field"><label for="reviewMoneyness">ITM / ATM / OTM</label><select id="reviewMoneyness"><option value="">Select</option>${MONEYNESS_OPTIONS.map(value => `<option value="${value}" ${moneyness === value ? 'selected' : ''}>${value}</option>`).join('')}</select></div>` : ''}
         <div class="field"><label>Realized P/L</label><div class="readonly-value ${pnlClass(realizedPnL)}" id="reviewPnlDisplay">${formatMoney(realizedPnL, { sign: true })}</div></div>
       </div>
       <div class="exit-builder">
@@ -760,6 +767,7 @@ async function openTrade(id) {
 
   const reviewEntry = document.querySelector('#reviewEntryPrice');
   const reviewSize = document.querySelector('#reviewPositionSize');
+  const reviewMoneyness = document.querySelector('#reviewMoneyness');
   const reviewRows = document.querySelector('#reviewExitRows');
   const reviewPnl = document.querySelector('#reviewPnlDisplay');
   const reviewSummary = document.querySelector('#reviewExitSummary');
@@ -785,8 +793,9 @@ async function openTrade(id) {
       const nextPnL = calculateRealizedPnL(nextEntry, nextExits, t.contractType);
       const updatedTrade = {
         ...t,
-        schemaVersion: Math.max(3, t.schemaVersion || 1),
+        schemaVersion: Math.max(4, t.schemaVersion || 1),
         updatedAt: new Date().toISOString(),
+        option: isOptionTrade ? { ...(t.option || {}), moneyness: reviewMoneyness?.value || null } : t.option,
         customFields: {
           ...(t.customFields || {}),
           entryPrice: nextEntry,
